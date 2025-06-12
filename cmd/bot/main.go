@@ -43,6 +43,11 @@ func main() {
 		log.Fatalf("Please set your bot token in %s", configPath)
 	}
 
+	// Check if MongoDB URI is set
+	if cfg.MongoURI == "" {
+		log.Fatalf("Please set MongoDB URI in %s", configPath)
+	}
+
 	// Ensure DB directory exists
 	dbDir := filepath.Dir(dbPath)
 	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
@@ -52,7 +57,7 @@ func main() {
 	}
 
 	// Initialize database
-	database, err := db.NewDB(dbPath)
+	database, err := db.NewDB(dbPath, cfg.MongoURI)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}

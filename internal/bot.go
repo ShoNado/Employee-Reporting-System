@@ -2,10 +2,13 @@ package internal
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"telegram-bot/config"
 	"telegram-bot/db"
 	"telegram-bot/models"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -98,6 +101,18 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
+	// Handle file uploads
+	if message.Document != nil {
+		b.handleFileUpload(message)
+		return
+	}
+
+	// Handle commands
+	if message.IsCommand() {
+		b.handleCommand(message)
+		return
+	}
+
 	// Process regular messages
 	b.processMessage(message)
 }
@@ -144,4 +159,130 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 
 	// Respond to callback
 	b.API.Request(tgbotapi.NewCallback(callback.ID, ""))
+}
+
+// handleFileUpload handles file uploads
+func (b *Bot) handleFileUpload(message *tgbotapi.Message) {
+	file := message.Document
+	fileID := file.FileID
+
+	// Get file from Telegram
+	fileConfig := tgbotapi.FileConfig{FileID: fileID}
+	fileData, err := b.API.GetFile(fileConfig)
+	if err != nil {
+		log.Printf("Error getting file: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+		b.API.Send(msg)
+		return
+	}
+
+	// Download file
+	fileURL := fileData.Link(b.API.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		log.Printf("Error downloading file: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при скачивании файла.")
+		b.API.Send(msg)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read file data
+	fileBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading file: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при чтении файла.")
+		b.API.Send(msg)
+		return
+	}
+
+	// Create file record
+	dbFile := &models.File{
+		UserID:    message.From.ID,
+		FileName:  file.FileName,
+		FileType:  file.MimeType,
+		FileData:  fileBytes,
+		CreatedAt: time.Now(),
+	}
+
+	// Save file to database
+	err = b.DB.SaveFile(dbFile)
+	if err != nil {
+		if err.Error() == "file already exists" {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Этот файл уже был загружен ранее.")
+			b.API.Send(msg)
+			return
+		}
+		log.Printf("Error saving file: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при сохранении файла.")
+		b.API.Send(msg)
+		return
+	}
+
+	// Send confirmation with file ID
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
+		dbFile.ID, dbFile.FileName, dbFile.FileType))
+	b.API.Send(msg)
+}
+
+// handleCommand handles bot commands
+func (b *Bot) handleCommand(message *tgbotapi.Message) {
+	command := message.Command()
+	args := message.CommandArguments()
+
+	switch command {
+	case "show":
+		if args == "" {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Пожалуйста, укажите ID файла. Например: /show 1")
+			b.API.Send(msg)
+			return
+		}
+
+		var fileID int64
+		_, err := fmt.Sscanf(args, "%d", &fileID)
+		if err != nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Неверный формат ID файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Get file from database
+		file, err := b.DB.GetFile(fileID)
+		if err != nil {
+			log.Printf("Error getting file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		if file == nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Файл не найден.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Check permissions
+		user, err := b.DB.GetUser(message.From.ID)
+		if err != nil {
+			log.Printf("Error getting user: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при проверке прав доступа.")
+			b.API.Send(msg)
+			return
+		}
+
+		if !user.IsAdmin && file.UserID != message.From.ID {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет прав для доступа к этому файлу.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Send file back to user
+		fileBytes := tgbotapi.FileBytes{
+			Name:  file.FileName,
+			Bytes: file.FileData,
+		}
+
+		doc := tgbotapi.NewDocument(message.Chat.ID, fileBytes)
+		b.API.Send(doc)
+	}
 }
