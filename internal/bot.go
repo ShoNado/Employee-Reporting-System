@@ -20,6 +20,34 @@ type Bot struct {
 	Config *config.Config
 }
 
+// verifyAdmins checks and updates admin status for all users in the database
+func (b *Bot) verifyAdmins() error {
+	// Get all users from the database
+	rows, err := b.DB.SQLite.Query("SELECT id, username FROM users")
+	if err != nil {
+		return fmt.Errorf("error querying users: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var username string
+		if err := rows.Scan(&id, &username); err != nil {
+			return fmt.Errorf("error scanning user row: %w", err)
+		}
+
+		// Check if user is admin in config
+		isAdmin := b.Config.IsAdmin(username)
+
+		// Update admin status in database
+		if err := b.DB.SetUserAdmin(id, isAdmin); err != nil {
+			return fmt.Errorf("error updating admin status for user %d: %w", id, err)
+		}
+	}
+
+	return rows.Err()
+}
+
 // NewBot creates a new Bot instance
 func NewBot(botToken string, database *db.DB, cfg *config.Config) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
@@ -27,11 +55,18 @@ func NewBot(botToken string, database *db.DB, cfg *config.Config) (*Bot, error) 
 		return nil, fmt.Errorf("failed to initialize bot: %w", err)
 	}
 
-	return &Bot{
+	bot := &Bot{
 		API:    api,
 		DB:     database,
 		Config: cfg,
-	}, nil
+	}
+
+	// Verify admin statuses at startup
+	if err := bot.verifyAdmins(); err != nil {
+		return nil, fmt.Errorf("failed to verify admins: %w", err)
+	}
+
+	return bot, nil
 }
 
 // Start starts the bot and listens for updates
@@ -101,9 +136,26 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	// Handle file uploads
+	// Handle different types of media
 	if message.Document != nil {
-		b.handleFileUpload(message)
+		b.handleFileUpload(message, message.Document.FileID, message.Document.FileName, message.Document.MimeType)
+		return
+	}
+
+	if message.Photo != nil {
+		// Get the largest photo size
+		photo := message.Photo[len(message.Photo)-1]
+		b.handleFileUpload(message, photo.FileID, "photo.jpg", "image/jpeg")
+		return
+	}
+
+	if message.Voice != nil {
+		b.handleFileUpload(message, message.Voice.FileID, "voice.ogg", "audio/ogg")
+		return
+	}
+
+	if message.Video != nil {
+		b.handleFileUpload(message, message.Video.FileID, "video.mp4", "video/mp4")
 		return
 	}
 
@@ -162,10 +214,7 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 }
 
 // handleFileUpload handles file uploads
-func (b *Bot) handleFileUpload(message *tgbotapi.Message) {
-	file := message.Document
-	fileID := file.FileID
-
+func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, fileType string) {
 	// Get file from Telegram
 	fileConfig := tgbotapi.FileConfig{FileID: fileID}
 	fileData, err := b.API.GetFile(fileConfig)
@@ -199,8 +248,8 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message) {
 	// Create file record
 	dbFile := &models.File{
 		UserID:    message.From.ID,
-		FileName:  file.FileName,
-		FileType:  file.MimeType,
+		FileName:  fileName,
+		FileType:  fileType,
 		FileData:  fileBytes,
 		CreatedAt: time.Now(),
 	}
@@ -237,6 +286,10 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 			b.API.Send(msg)
 			return
 		}
+
+		// Send immediate response
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Ожидайте загрузки файла...")
+		b.API.Send(msg)
 
 		var fileID int64
 		_, err := fmt.Sscanf(args, "%d", &fileID)

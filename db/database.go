@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"telegram-bot/models"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"go.mongodb.org/mongo-driver/bson"
@@ -14,17 +16,29 @@ import (
 
 // DB is a wrapper around both SQLite and MongoDB
 type DB struct {
-	sqlite *sql.DB
+	SQLite *sql.DB
 	mongo  *mongo.Client
 	files  *mongo.Collection
 }
 
 // NewDB creates new database connections
 func NewDB(sqlitePath, mongoURI string) (*DB, error) {
-	// Connect to SQLite
+	// Connect to SQLite with configuration
 	sqliteDB, err := sql.Open("sqlite3", sqlitePath)
 	if err != nil {
 		return nil, err
+	}
+
+	// Configure SQLite for better reliability
+	sqliteDB.SetMaxOpenConns(10) // Allow more connections
+	sqliteDB.SetConnMaxLifetime(time.Hour)
+	sqliteDB.SetMaxIdleConns(5)
+
+	// Set busy timeout to handle locks
+	_, err = sqliteDB.Exec("PRAGMA busy_timeout=10000") // 10 seconds timeout
+	if err != nil {
+		sqliteDB.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
 	}
 
 	// Connect to MongoDB
@@ -39,7 +53,7 @@ func NewDB(sqlitePath, mongoURI string) (*DB, error) {
 	files := database.Collection("files")
 
 	return &DB{
-		sqlite: sqliteDB,
+		SQLite: sqliteDB,
 		mongo:  mongoClient,
 		files:  files,
 	}, nil
@@ -58,7 +72,7 @@ func (db *DB) InitDB() error {
 	);
 	`
 
-	_, err := db.sqlite.Exec(query)
+	_, err := db.SQLite.Exec(query)
 	return err
 }
 
@@ -75,7 +89,7 @@ func (db *DB) SaveUser(user *models.User) error {
 		is_admin = excluded.is_admin
 	`
 
-	_, err := db.sqlite.Exec(query, user.ID, user.Username, user.FirstName, user.LastName, user.Phone, user.IsAdmin)
+	_, err := db.SQLite.Exec(query, user.ID, user.Username, user.FirstName, user.LastName, user.Phone, user.IsAdmin)
 	return err
 }
 
@@ -84,7 +98,7 @@ func (db *DB) GetUser(id int64) (*models.User, error) {
 	query := `SELECT id, username, first_name, last_name, phone, is_admin FROM users WHERE id = ?`
 
 	var user models.User
-	err := db.sqlite.QueryRow(query, id).Scan(
+	err := db.SQLite.QueryRow(query, id).Scan(
 		&user.ID, &user.Username, &user.FirstName, &user.LastName, &user.Phone, &user.IsAdmin,
 	)
 	if err == sql.ErrNoRows {
@@ -100,14 +114,14 @@ func (db *DB) GetUser(id int64) (*models.User, error) {
 // UpdateUserPhone updates a user's phone number
 func (db *DB) UpdateUserPhone(id int64, phone string) error {
 	query := `UPDATE users SET phone = ? WHERE id = ?`
-	_, err := db.sqlite.Exec(query, phone, id)
+	_, err := db.SQLite.Exec(query, phone, id)
 	return err
 }
 
 // SetUserAdmin sets a user's admin status
 func (db *DB) SetUserAdmin(id int64, isAdmin bool) error {
 	query := `UPDATE users SET is_admin = ? WHERE id = ?`
-	_, err := db.sqlite.Exec(query, isAdmin, id)
+	_, err := db.SQLite.Exec(query, isAdmin, id)
 	return err
 }
 
@@ -170,7 +184,7 @@ func (db *DB) GetUserFiles(userID int64) ([]*models.File, error) {
 
 // Close closes all database connections
 func (db *DB) Close() error {
-	if err := db.sqlite.Close(); err != nil {
+	if err := db.SQLite.Close(); err != nil {
 		return err
 	}
 	return db.mongo.Disconnect(context.Background())
