@@ -127,17 +127,49 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 	if message.Photo != nil {
 		// Get the largest photo size
 		photo := message.Photo[len(message.Photo)-1]
-		b.handleFileUpload(message, photo.FileID, "photo.jpg", "image/jpeg")
+		// Check if it's a HEIC image
+		if strings.HasSuffix(strings.ToLower(message.Caption), ".heic") {
+			b.handleFileUpload(message, photo.FileID, "photo.heic", "image/heic")
+		} else {
+			b.handleFileUpload(message, photo.FileID, "photo.jpg", "image/jpeg")
+		}
 		return
 	}
 
 	if message.Voice != nil {
+		// Handle voice message
 		b.handleFileUpload(message, message.Voice.FileID, "voice.ogg", "audio/ogg")
 		return
 	}
 
+	if message.Audio != nil {
+		// Handle audio file
+		fileName := message.Audio.FileName
+		if fileName == "" {
+			fileName = "audio.mp3"
+		}
+		b.handleFileUpload(message, message.Audio.FileID, fileName, "audio/mpeg")
+		return
+	}
+
 	if message.Video != nil {
-		b.handleFileUpload(message, message.Video.FileID, "video.mp4", "video/mp4")
+		// Handle video file
+		fileName := message.Video.FileName
+		if fileName == "" {
+			// Check if it's a MOV file
+			if strings.HasSuffix(strings.ToLower(message.Caption), ".mov") {
+				fileName = "video.mov"
+			} else {
+				fileName = "video.mp4"
+			}
+		}
+		b.handleFileUpload(message, message.Video.FileID, fileName, "video/mp4")
+		return
+	}
+
+	if message.VideoNote != nil {
+		// Handle video note (circular video)
+		b.handleFileUpload(message, message.VideoNote.FileID, "video_note.mp4", "video/mp4")
 		return
 	}
 
@@ -221,6 +253,12 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 	fileConfig := tgbotapi.FileConfig{FileID: fileID}
 	fileData, err := b.API.GetFile(fileConfig)
 	if err != nil {
+		// Check if error is due to file size
+		if strings.Contains(err.Error(), "file is too big") {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, файл слишком большой. Максимальный размер файла - 100 МБ.")
+			b.API.Send(msg)
+			return
+		}
 		log.Printf("Error getting file: %v", err)
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
 		b.API.Send(msg)
@@ -234,6 +272,10 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 		b.API.Send(msg)
 		return
 	}
+
+	// Send loading message
+	loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
+	b.API.Send(loadingMsg)
 
 	// Download file
 	fileURL := fileData.Link(b.API.Token)
@@ -279,7 +321,7 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 	}
 
 	// Send confirmation with file ID
-	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
+	msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
 		dbFile.ID, dbFile.FileName, dbFile.FileType))
 	b.API.Send(msg)
 }
