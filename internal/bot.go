@@ -227,6 +227,14 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 		return
 	}
 
+	// Check file size (100MB limit)
+	const maxFileSize = 100 * 1024 * 1024 // 100MB in bytes
+	if fileData.FileSize > maxFileSize {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, файл слишком большой. Максимальный размер файла - 100 МБ.")
+		b.API.Send(msg)
+		return
+	}
+
 	// Download file
 	fileURL := fileData.Link(b.API.Token)
 	resp, err := http.Get(fileURL)
@@ -282,6 +290,23 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 	args := message.CommandArguments()
 
 	switch command {
+	case "start":
+		helpText := `Добро пожаловать! Я бот для хранения и управления файлами.
+
+Доступные команды:
+/list - показать список ваших файлов
+/show <id> - показать файл по его ID
+/delete <id> - удалить файл по его ID
+
+Ограничения:
+- Максимальный размер файла: 100 МБ
+- Поддерживаемые типы файлов: документы, фото, видео, голосовые сообщения
+
+Для начала работы просто отправьте мне любой файл!`
+
+		msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
+		b.API.Send(msg)
+
 	case "list":
 		// Get user's files
 		files, err := b.DB.GetUserFiles(message.From.ID)
@@ -441,6 +466,10 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Вы уверены, что хотите удалить файл %s?", file.FileName))
 		msg.ReplyMarkup = keyboard
+		b.API.Send(msg)
+
+	default:
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, такой команды не существует. Используйте /start для получения списка доступных команд.")
 		b.API.Send(msg)
 	}
 }
