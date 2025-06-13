@@ -249,18 +249,80 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 
 // handleFileUpload handles file uploads
 func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, fileType string) {
-	// Get file from Telegram
+	// First try to get file info from Telegram API
 	fileConfig := tgbotapi.FileConfig{FileID: fileID}
 	fileData, err := b.API.GetFile(fileConfig)
 	if err != nil {
-		// Check if error is due to file size
-		if strings.Contains(err.Error(), "file is too big") {
+		log.Printf("Error getting file info, trying alternative method: %v", err)
+
+		// Try alternative method - direct download
+		fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.API.Token, fileID)
+		resp, err := http.Get(fileURL)
+		if err != nil {
+			log.Printf("Error downloading file via alternative method: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+			b.API.Send(msg)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Check if we got a valid file (not an error response)
+		contentType := resp.Header.Get("Content-Type")
+		if strings.Contains(contentType, "application/json") {
+			// If we got JSON response, it's probably an error
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("Received JSON response instead of file: %s", string(body))
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Check file size
+		if resp.ContentLength > 100*1024*1024 { // 100MB
 			msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, файл слишком большой. Максимальный размер файла - 100 МБ.")
 			b.API.Send(msg)
 			return
 		}
-		log.Printf("Error getting file: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+
+		// Send loading message
+		loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
+		b.API.Send(loadingMsg)
+
+		// Read file data
+		fileBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Error reading file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при чтении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Create file record
+		dbFile := &models.File{
+			UserID:    message.From.ID,
+			FileName:  fileName,
+			FileType:  fileType,
+			FileData:  fileBytes,
+			CreatedAt: time.Now(),
+		}
+
+		// Save file to database
+		err = b.DB.SaveFile(dbFile)
+		if err != nil {
+			if err.Error() == "file already exists" {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Этот файл уже был загружен ранее.")
+				b.API.Send(msg)
+				return
+			}
+			log.Printf("Error saving file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при сохранении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Send confirmation with file ID
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
+			dbFile.ID, dbFile.FileName, dbFile.FileType))
 		b.API.Send(msg)
 		return
 	}
@@ -277,7 +339,7 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 	loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
 	b.API.Send(loadingMsg)
 
-	// Download file
+	// Get file URL and download
 	fileURL := fileData.Link(b.API.Token)
 	resp, err := http.Get(fileURL)
 	if err != nil {
@@ -444,14 +506,27 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 			return
 		}
 
-		// Send file back to user
+		// Create file bytes with proper name and type
 		fileBytes := tgbotapi.FileBytes{
 			Name:  file.FileName,
 			Bytes: file.FileData,
 		}
 
-		doc := tgbotapi.NewDocument(message.Chat.ID, fileBytes)
-		b.API.Send(doc)
+		// Send file based on its type
+		switch {
+		case strings.HasPrefix(file.FileType, "image/"):
+			photo := tgbotapi.NewPhoto(message.Chat.ID, fileBytes)
+			b.API.Send(photo)
+		case strings.HasPrefix(file.FileType, "video/"):
+			video := tgbotapi.NewVideo(message.Chat.ID, fileBytes)
+			b.API.Send(video)
+		case strings.HasPrefix(file.FileType, "audio/"):
+			audio := tgbotapi.NewAudio(message.Chat.ID, fileBytes)
+			b.API.Send(audio)
+		default:
+			doc := tgbotapi.NewDocument(message.Chat.ID, fileBytes)
+			b.API.Send(doc)
+		}
 
 	case "delete":
 		if args == "" {
