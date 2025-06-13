@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"telegram-bot/config"
 	"telegram-bot/db"
 	"telegram-bot/models"
@@ -22,30 +24,8 @@ type Bot struct {
 
 // verifyAdmins checks and updates admin status for all users in the database
 func (b *Bot) verifyAdmins() error {
-	// Get all users from the database
-	rows, err := b.DB.SQLite.Query("SELECT id, username FROM users")
-	if err != nil {
-		return fmt.Errorf("error querying users: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id int64
-		var username string
-		if err := rows.Scan(&id, &username); err != nil {
-			return fmt.Errorf("error scanning user row: %w", err)
-		}
-
-		// Check if user is admin in config
-		isAdmin := b.Config.IsAdmin(username)
-
-		// Update admin status in database
-		if err := b.DB.SetUserAdmin(id, isAdmin); err != nil {
-			return fmt.Errorf("error updating admin status for user %d: %w", id, err)
-		}
-	}
-
-	return rows.Err()
+	// Update all admin statuses at once using the config
+	return b.DB.UpdateAdminStatuses(b.Config.Admins)
 }
 
 // NewBot creates a new Bot instance
@@ -126,7 +106,9 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 				log.Printf("Error updating phone: %v", err)
 			}
 
+			// Remove keyboard and send confirmation
 			msg := tgbotapi.NewMessage(message.Chat.ID, "Спасибо! Ваш номер телефона сохранен.")
+			msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 			b.API.Send(msg)
 			return
 		}
@@ -209,6 +191,26 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	// Handle any callback queries here
 	log.Printf("[CALLBACK] %s: %s", callback.From.UserName, callback.Data)
 
+	// Handle delete confirmation
+	if strings.HasPrefix(callback.Data, "confirm_delete_") {
+		fileID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "confirm_delete_"), 10, 64)
+
+		// Delete file
+		err := b.DB.DeleteFile(fileID)
+		if err != nil {
+			log.Printf("Error deleting file: %v", err)
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Файл успешно удален.")
+		b.API.Send(msg)
+	} else if strings.HasPrefix(callback.Data, "cancel_delete_") {
+		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файла отменено.")
+		b.API.Send(msg)
+	}
+
 	// Respond to callback
 	b.API.Request(tgbotapi.NewCallback(callback.ID, ""))
 }
@@ -280,6 +282,52 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 	args := message.CommandArguments()
 
 	switch command {
+	case "list":
+		// Get user's files
+		files, err := b.DB.GetUserFiles(message.From.ID)
+		if err != nil {
+			log.Printf("Error getting user files: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении списка файлов.")
+			b.API.Send(msg)
+			return
+		}
+
+		// If user is admin, get all files
+		user, err := b.DB.GetUser(message.From.ID)
+		if err != nil {
+			log.Printf("Error getting user: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при проверке прав доступа.")
+			b.API.Send(msg)
+			return
+		}
+
+		if user.IsAdmin {
+			// Get all files from all users
+			allFiles, err := b.DB.GetAllFiles()
+			if err != nil {
+				log.Printf("Error getting all files: %v", err)
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении списка файлов.")
+				b.API.Send(msg)
+				return
+			}
+			files = allFiles
+		}
+
+		if len(files) == 0 {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет доступных файлов.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Format file list
+		var response strings.Builder
+		for i, file := range files {
+			response.WriteString(fmt.Sprintf("%d. %s (ID: %d)\n", i+1, file.FileName, file.ID))
+		}
+
+		msg := tgbotapi.NewMessage(message.Chat.ID, response.String())
+		b.API.Send(msg)
+
 	case "show":
 		if args == "" {
 			msg := tgbotapi.NewMessage(message.Chat.ID, "Пожалуйста, укажите ID файла. Например: /show 1")
@@ -337,5 +385,62 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 
 		doc := tgbotapi.NewDocument(message.Chat.ID, fileBytes)
 		b.API.Send(doc)
+
+	case "delete":
+		if args == "" {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Пожалуйста, укажите ID файла. Например: /delete 1")
+			b.API.Send(msg)
+			return
+		}
+
+		var fileID int64
+		_, err := fmt.Sscanf(args, "%d", &fileID)
+		if err != nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Неверный формат ID файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Get file from database
+		file, err := b.DB.GetFile(fileID)
+		if err != nil {
+			log.Printf("Error getting file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при получении файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		if file == nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Файл не найден.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Check permissions
+		user, err := b.DB.GetUser(message.From.ID)
+		if err != nil {
+			log.Printf("Error getting user: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при проверке прав доступа.")
+			b.API.Send(msg)
+			return
+		}
+
+		if !user.IsAdmin && file.UserID != message.From.ID {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "У вас нет прав для удаления этого файла.")
+			b.API.Send(msg)
+			return
+		}
+
+		// Create inline keyboard for confirmation
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✅ Подтвердить", fmt.Sprintf("confirm_delete_%d", fileID)),
+				tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", fmt.Sprintf("cancel_delete_%d", fileID)),
+			),
+		)
+
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Вы уверены, что хотите удалить файл %s?", file.FileName))
+		msg.ReplyMarkup = keyboard
+		b.API.Send(msg)
 	}
 }

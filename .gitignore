@@ -1,4 +1,3 @@
 /config/config.json
-.db
-.db-shm
-.db-wal
+
+db/telegram.db

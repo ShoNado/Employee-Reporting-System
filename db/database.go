@@ -182,6 +182,60 @@ func (db *DB) GetUserFiles(userID int64) ([]*models.File, error) {
 	return files, nil
 }
 
+// DeleteFile deletes a file by ID
+func (db *DB) DeleteFile(id int64) error {
+	_, err := db.files.DeleteOne(context.Background(), bson.M{"_id": id})
+	return err
+}
+
+// GetAllFiles retrieves all files from the database
+func (db *DB) GetAllFiles() ([]*models.File, error) {
+	cursor, err := db.files.Find(context.Background(), bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(context.Background())
+
+	var files []*models.File
+	if err = cursor.All(context.Background(), &files); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// UpdateAdminStatuses updates admin status for all users based on the provided admin map
+func (db *DB) UpdateAdminStatuses(admins map[string]bool) error {
+	// Start a transaction
+	tx, err := db.SQLite.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// First, set all users to non-admin
+	_, err = tx.Exec("UPDATE users SET is_admin = 0")
+	if err != nil {
+		return fmt.Errorf("failed to reset admin statuses: %w", err)
+	}
+
+	// Then update only those who are admins
+	for username, isAdmin := range admins {
+		if isAdmin {
+			_, err = tx.Exec("UPDATE users SET is_admin = 1 WHERE username = ?", username)
+			if err != nil {
+				return fmt.Errorf("failed to update admin status for %s: %w", username, err)
+			}
+		}
+	}
+
+	// Commit the transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
 // Close closes all database connections
 func (db *DB) Close() error {
 	if err := db.SQLite.Close(); err != nil {
