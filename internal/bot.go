@@ -241,6 +241,21 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	} else if strings.HasPrefix(callback.Data, "cancel_delete_") {
 		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файла отменено.")
 		b.API.Send(msg)
+	} else if callback.Data == "confirm_delete_all" {
+		// Delete all files for the user
+		err := b.DB.DeleteUserFiles(callback.From.ID)
+		if err != nil {
+			log.Printf("Error deleting files: %v", err)
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файлов.")
+			b.API.Send(msg)
+			return
+		}
+
+		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Все доступные вам файлы успешно удалены.")
+		b.API.Send(msg)
+	} else if callback.Data == "cancel_delete_all" {
+		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файлов отменено.")
+		b.API.Send(msg)
 	}
 
 	// Respond to callback
@@ -401,6 +416,7 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 /list - показать список ваших файлов
 /show <id> - показать файл по его ID
 /delete <id> - удалить файл по его ID
+/deleteall - удалить все доступные вам файлы
 
 Ограничения:
 - Максимальный размер файла: 100 МБ
@@ -582,6 +598,19 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 		)
 
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Вы уверены, что хотите удалить файл %s?", file.FileName))
+		msg.ReplyMarkup = keyboard
+		b.API.Send(msg)
+
+	case "deleteall":
+		// Create inline keyboard for confirmation
+		keyboard := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✅ Подтвердить", "confirm_delete_all"),
+				tgbotapi.NewInlineKeyboardButtonData("❌ Отмена", "cancel_delete_all"),
+			),
+		)
+
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Вы уверены, что хотите удалить все доступные вам файлы? Это действие нельзя отменить.")
 		msg.ReplyMarkup = keyboard
 		b.API.Send(msg)
 

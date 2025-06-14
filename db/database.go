@@ -236,6 +236,12 @@ func (db *DB) UpdateAdminStatuses(admins map[string]bool) error {
 	return nil
 }
 
+// DeleteUserFiles deletes all files for a specific user
+func (db *DB) DeleteUserFiles(userID int64) error {
+	_, err := db.files.DeleteMany(context.Background(), bson.M{"user_id": userID})
+	return err
+}
+
 // Close closes all database connections
 func (db *DB) Close() error {
 	if err := db.SQLite.Close(); err != nil {
