@@ -246,7 +246,18 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 				return
 			}
 
-			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Все доступные вам файлы успешно удалены.")
+			// Обновляем статус всех файлов пользователя в Google Sheets
+			if b.SheetsService != nil {
+				err := b.SheetsService.MarkAllFilesAsDeleted(callback.From.ID)
+				if err != nil {
+					log.Printf("Error updating file statuses in Google Sheets: %v", err)
+					// Продолжаем выполнение, даже если обновление статусов не удалось
+				} else {
+					log.Printf("All files marked as deleted for user %d in Google Sheets", callback.From.ID)
+				}
+			}
+
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Все ваши файлы успешно удалены.")
 			b.API.Send(msg)
 		} else {
 			// Handle delete single file
@@ -259,6 +270,17 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 				msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файла.")
 				b.API.Send(msg)
 				return
+			}
+
+			// Обновляем статус файла в Google Sheets
+			if b.SheetsService != nil {
+				err := b.SheetsService.UpdateFileStatus(fileID, FileStatusDeleted)
+				if err != nil {
+					log.Printf("Error updating file status in Google Sheets: %v", err)
+					// Продолжаем выполнение, даже если обновление статуса не удалось
+				} else {
+					log.Printf("File %d marked as deleted in Google Sheets", fileID)
+				}
 			}
 
 			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Файл успешно удален.")
@@ -280,6 +302,13 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 
 // handleFileUpload handles file uploads
 func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, fileType string) {
+	var fileBytes []byte
+	var err error
+
+	// Send loading message
+	loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
+	b.API.Send(loadingMsg)
+
 	// First try to get file info from Telegram API
 	fileConfig := tgbotapi.FileConfig{FileID: fileID}
 	fileData, err := b.API.GetFile(fileConfig)
@@ -315,95 +344,42 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 			return
 		}
 
-		// Send loading message
-		loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
-		b.API.Send(loadingMsg)
-
 		// Read file data
-		fileBytes, err := io.ReadAll(resp.Body)
+		fileBytes, err = io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("Error reading file: %v", err)
 			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при чтении файла.")
 			b.API.Send(msg)
 			return
 		}
-
-		// Create file record
-		dbFile := &models.File{
-			UserID:    message.From.ID,
-			FileName:  fileName,
-			FileType:  fileType,
-			FileData:  fileBytes,
-			CreatedAt: time.Now(),
-		}
-
-		// Save file to database
-		err = b.DB.SaveFile(dbFile)
-		if err != nil {
-			if err.Error() == "file already exists" {
-				msg := tgbotapi.NewMessage(message.Chat.ID, "Этот файл уже был загружен ранее.")
-				b.API.Send(msg)
-				return
-			}
-			log.Printf("Error saving file: %v", err)
-			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при сохранении файла.")
+	} else {
+		// Check file size (100MB limit)
+		const maxFileSize = 100 * 1024 * 1024 // 100MB in bytes
+		if fileData.FileSize > maxFileSize {
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, файл слишком большой. Максимальный размер файла - 100 МБ.")
 			b.API.Send(msg)
 			return
 		}
 
-		// Log file upload to Google Sheets if service is available
-		if b.SheetsService != nil {
-			username := message.From.UserName
-			if username == "" {
-				username = fmt.Sprintf("%s %s", message.From.FirstName, message.From.LastName)
-			}
-
-			err := b.SheetsService.LogFileUpload(dbFile, username)
-			if err != nil {
-				log.Printf("Error logging to Google Sheets: %v", err)
-				// Продолжаем выполнение, даже если запись в Google Sheets не удалась
-			} else {
-				log.Printf("File upload logged to Google Sheets: ID=%d, User=%s", dbFile.ID, username)
-			}
+		// Get file URL and download
+		fileURL := fileData.Link(b.API.Token)
+		resp, err := http.Get(fileURL)
+		if err != nil {
+			log.Printf("Error downloading file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при скачивании файла.")
+			b.API.Send(msg)
+			return
 		}
+		defer resp.Body.Close()
 
-		// Send confirmation with file ID
-		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
-			dbFile.ID, dbFile.FileName, dbFile.FileType))
-		b.API.Send(msg)
-		return
-	}
-
-	// Check file size (100MB limit)
-	const maxFileSize = 100 * 1024 * 1024 // 100MB in bytes
-	if fileData.FileSize > maxFileSize {
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Извините, файл слишком большой. Максимальный размер файла - 100 МБ.")
-		b.API.Send(msg)
-		return
-	}
-
-	// Send loading message
-	loadingMsg := tgbotapi.NewMessage(message.Chat.ID, "⏳ Файл загружается в базу данных, пожалуйста, подождите...")
-	b.API.Send(loadingMsg)
-
-	// Get file URL and download
-	fileURL := fileData.Link(b.API.Token)
-	resp, err := http.Get(fileURL)
-	if err != nil {
-		log.Printf("Error downloading file: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при скачивании файла.")
-		b.API.Send(msg)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Read file data
-	fileBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Error reading file: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при чтении файла.")
-		b.API.Send(msg)
-		return
+		// Read file data
+		fileBytes, err = io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Error reading file: %v", err)
+			msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при чтении файла.")
+			b.API.Send(msg)
+			return
+		}
 	}
 
 	// Create file record
@@ -443,6 +419,9 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 		} else {
 			log.Printf("File upload logged to Google Sheets: ID=%d, User=%s", dbFile.ID, username)
 		}
+
+		// Добавляем задержку в 1 секунду, чтобы дать Google Sheets время обновиться
+		time.Sleep(1 * time.Second)
 	}
 
 	// Send confirmation with file ID

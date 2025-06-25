@@ -21,6 +21,10 @@ const (
 
 	// Диапазон для записи данных (лист и диапазон)
 	readRange = "Лист1!A1:Z1000"
+
+	// Статусы файлов
+	FileStatusActive  = "Активен"
+	FileStatusDeleted = "Удален"
 )
 
 // SheetsService представляет сервис для работы с Google Sheets
@@ -116,17 +120,46 @@ func (s *SheetsService) LogFileUpload(file *models.File, username string) error 
 		return fmt.Errorf("unable to retrieve data from sheet: %v", err)
 	}
 
-	// Определяем следующую свободную строку
-	nextRow := 1
+	// Находим первую пустую строку для записи
+	nextRow := 1 // По умолчанию начинаем со строки 1 (заголовок)
+
 	if len(resp.Values) > 0 {
-		nextRow = len(resp.Values) + 1
+		// Ищем первую пустую строку
+		for i, row := range resp.Values {
+			// Проверяем, является ли строка пустой или содержит только пустые ячейки
+			isEmpty := true
+			if len(row) > 0 {
+				for _, cell := range row {
+					if cell != nil && cell != "" {
+						isEmpty = false
+						break
+					}
+				}
+			}
+
+			if isEmpty {
+				// Нашли пустую строку
+				nextRow = i + 1 // +1 потому что индексы начинаются с 0
+				break
+			}
+
+			// Если дошли до конца и не нашли пустую строку
+			if i == len(resp.Values)-1 {
+				nextRow = len(resp.Values) + 1
+			}
+		}
+	}
+
+	// Если таблица пуста, начинаем с 2 (после заголовка)
+	if nextRow == 1 && len(resp.Values) > 0 {
+		nextRow = 2
 	}
 
 	// Форматируем время
 	timeStr := file.CreatedAt.Format("2006-01-02 15:04:05")
 
 	// Создаем новую запись
-	// Столбцы: ID файла, ID пользователя, Имя пользователя, Имя файла, Тип файла, Размер файла, Дата и время
+	// Столбцы: ID файла, ID пользователя, Имя пользователя, Имя файла, Тип файла, Размер файла, Дата и время, Статус
 	values := []interface{}{
 		file.ID,            // ID файла
 		file.UserID,        // ID пользователя
@@ -135,6 +168,7 @@ func (s *SheetsService) LogFileUpload(file *models.File, username string) error 
 		file.FileType,      // Тип файла
 		len(file.FileData), // Размер файла в байтах
 		timeStr,            // Дата и время загрузки
+		FileStatusActive,   // Статус файла (по умолчанию активен)
 	}
 
 	// Подготавливаем запрос на обновление
@@ -143,7 +177,7 @@ func (s *SheetsService) LogFileUpload(file *models.File, username string) error 
 	}
 
 	// Определяем диапазон для записи (строка целиком)
-	writeRange := fmt.Sprintf("Лист1!A%d:G%d", nextRow, nextRow)
+	writeRange := fmt.Sprintf("Лист1!A%d:H%d", nextRow, nextRow)
 
 	// Записываем данные в таблицу
 	// Используем метод Update для обновления существующих данных
@@ -158,6 +192,118 @@ func (s *SheetsService) LogFileUpload(file *models.File, username string) error 
 
 	if err != nil {
 		return fmt.Errorf("unable to write data to sheet: %v", err)
+	}
+
+	return nil
+}
+
+// UpdateFileStatus обновляет статус файла в Google Sheets
+func (s *SheetsService) UpdateFileStatus(fileID int64, status string) error {
+	// Получаем текущие данные из таблицы
+	resp, err := s.service.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		return fmt.Errorf("unable to retrieve data from sheet: %v", err)
+	}
+
+	// Ищем строку с нужным ID файла
+	rowIndex := -1
+	for i, row := range resp.Values {
+		if len(row) > 0 {
+			// Проверяем, что первый столбец содержит ID файла
+			if id, ok := row[0].(float64); ok && int64(id) == fileID {
+				rowIndex = i + 1 // +1 потому что строки в Sheets начинаются с 1
+				break
+			} else if id, ok := row[0].(string); ok {
+				// Пытаемся преобразовать строку в число
+				var numID int64
+				_, err := fmt.Sscanf(id, "%d", &numID)
+				if err == nil && numID == fileID {
+					rowIndex = i + 1
+					break
+				}
+			}
+		}
+	}
+
+	if rowIndex == -1 {
+		return fmt.Errorf("file with ID %d not found in sheet", fileID)
+	}
+
+	// Обновляем статус файла (столбец H)
+	writeRange := fmt.Sprintf("Лист1!H%d", rowIndex)
+	valueRange := &sheets.ValueRange{
+		Values: [][]interface{}{{status}},
+	}
+
+	_, err = s.service.Spreadsheets.Values.Update(
+		spreadsheetID,
+		writeRange,
+		valueRange).
+		ValueInputOption("USER_ENTERED").
+		Do()
+
+	if err != nil {
+		return fmt.Errorf("unable to update file status: %v", err)
+	}
+
+	return nil
+}
+
+// MarkAllFilesAsDeleted отмечает все файлы пользователя как удаленные
+func (s *SheetsService) MarkAllFilesAsDeleted(userID int64) error {
+	// Получаем текущие данные из таблицы
+	resp, err := s.service.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		return fmt.Errorf("unable to retrieve data from sheet: %v", err)
+	}
+
+	// Собираем все строки, которые нужно обновить
+	var updates []*sheets.ValueRange
+
+	for i, row := range resp.Values {
+		if len(row) > 1 { // Проверяем, что есть хотя бы два столбца (ID файла и ID пользователя)
+			// Проверяем, что второй столбец содержит ID пользователя
+			if id, ok := row[1].(float64); ok && int64(id) == userID {
+				// Обновляем статус файла (столбец H)
+				writeRange := fmt.Sprintf("Лист1!H%d", i+1) // +1 потому что строки в Sheets начинаются с 1
+				valueRange := &sheets.ValueRange{
+					Range:  writeRange,
+					Values: [][]interface{}{{FileStatusDeleted}},
+				}
+				updates = append(updates, valueRange)
+			} else if id, ok := row[1].(string); ok {
+				// Пытаемся преобразовать строку в число
+				var numID int64
+				_, err := fmt.Sscanf(id, "%d", &numID)
+				if err == nil && numID == userID {
+					writeRange := fmt.Sprintf("Лист1!H%d", i+1)
+					valueRange := &sheets.ValueRange{
+						Range:  writeRange,
+						Values: [][]interface{}{{FileStatusDeleted}},
+					}
+					updates = append(updates, valueRange)
+				}
+			}
+		}
+	}
+
+	// Если нет файлов для обновления, выходим
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Выполняем пакетное обновление
+	batchUpdateRequest := &sheets.BatchUpdateValuesRequest{
+		ValueInputOption: "USER_ENTERED",
+		Data:             updates,
+	}
+
+	_, err = s.service.Spreadsheets.Values.BatchUpdate(
+		spreadsheetID,
+		batchUpdateRequest).Do()
+
+	if err != nil {
+		return fmt.Errorf("unable to batch update file statuses: %v", err)
 	}
 
 	return nil

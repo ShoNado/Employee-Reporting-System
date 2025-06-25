@@ -126,6 +126,9 @@ go run cmd/bot/main.go
 - Тип файла
 - Размер файла
 - Дата и время загрузки
+- Статус файла (Активен/Удален)
+
+При удалении файла через команды `/delete` или `/deleteall`, статус файла в таблице автоматически обновляется на "Удален".
 
 Таблица доступна по ссылке: [Google Sheets](https://docs.google.com/spreadsheets/d/13KIfRMTePI4djpi6W4pm6WKaE0I9sTA4-LPkesS724I/edit?usp=sharing)
 
