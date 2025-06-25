@@ -14,12 +14,15 @@ Telegram бот на Go с использованием SQLite для хране
 - Логирование действий пользователей
 - Настройка администраторов через конфиг-файл
 - Защита от неавторизованного доступа
+- Дублирование информации о загрузке файлов в Google Sheets
 
 ## Требования
 
 - Go 1.21 или выше
 - SQLite3
+- MongoDB
 - Telegram Bot Token
+- Google Sheets API credentials
 
 ## Установка
 
@@ -40,6 +43,7 @@ Telegram бот на Go с использованием SQLite для хране
    ```json
    {
      "bot_token": "YOUR_BOT_TOKEN_HERE",
+     "mongo_uri": "mongodb://localhost:27017",
      "admins": {
        "admin_username": true
      }
@@ -48,6 +52,14 @@ Telegram бот на Go с использованием SQLite для хране
 
 2. Замените `YOUR_BOT_TOKEN_HERE` на токен вашего бота
 3. Добавьте username'ы администраторов в список `admins`
+
+### Настройка Google Sheets API
+
+1. Создайте проект в [Google Cloud Console](https://console.cloud.google.com/)
+2. Включите Google Sheets API для проекта
+3. Создайте учетные данные OAuth 2.0
+4. Скачайте JSON-файл с учетными данными и сохраните его как `config/credentials.json`
+5. При первом запуске бота следуйте инструкциям для авторизации
 
 ## Запуск
 
@@ -63,11 +75,13 @@ go run cmd/bot/main.go
 │   └── bot/
 │       └── main.go         # Точка входа приложения
 ├── config/
-│   └── config.json        # Конфигурационный файл
+│   ├── config.json        # Конфигурационный файл
+│   └── credentials.json   # Учетные данные Google API
 ├── db/
 │   └── database.go        # Работа с базой данных
 ├── internal/
-│   └── bot.go            # Основная логика бота
+│   ├── bot.go            # Основная логика бота
+│   └── sheets.go         # Интеграция с Google Sheets
 ├── models/
 │   └── user.go           # Модели данных
 ├── go.mod                # Зависимости Go
@@ -100,6 +114,20 @@ go run cmd/bot/main.go
 - Доступ ко всем командам бота
 - Управление пользователями
 - Просмотр статистики
+
+## Интеграция с Google Sheets
+
+Бот автоматически дублирует информацию о загружаемых файлах в Google Sheets. Для каждого файла записывается:
+
+- ID файла
+- ID пользователя
+- Имя пользователя
+- Имя файла
+- Тип файла
+- Размер файла
+- Дата и время загрузки
+
+Таблица доступна по ссылке: [Google Sheets](https://docs.google.com/spreadsheets/d/13KIfRMTePI4djpi6W4pm6WKaE0I9sTA4-LPkesS724I/edit?usp=sharing)
 
 ## Безопасность
 

@@ -17,9 +17,10 @@ import (
 
 // Bot represents the Telegram bot and its dependencies
 type Bot struct {
-	API    *tgbotapi.BotAPI
-	DB     *db.DB
-	Config *config.Config
+	API           *tgbotapi.BotAPI
+	DB            *db.DB
+	Config        *config.Config
+	SheetsService *SheetsService
 }
 
 // verifyAdmins checks and updates admin status for all users in the database
@@ -35,10 +36,19 @@ func NewBot(botToken string, database *db.DB, cfg *config.Config) (*Bot, error) 
 		return nil, fmt.Errorf("failed to initialize bot: %w", err)
 	}
 
+	// Инициализация Google Sheets API
+	sheetsService, err := NewSheetsService("config/credentials.json")
+	if err != nil {
+		log.Printf("Warning: Failed to initialize Google Sheets API: %v", err)
+		// Продолжаем без Google Sheets
+		sheetsService = nil
+	}
+
 	bot := &Bot{
-		API:    api,
-		DB:     database,
-		Config: cfg,
+		API:           api,
+		DB:            database,
+		Config:        cfg,
+		SheetsService: sheetsService,
 	}
 
 	// Verify admin statuses at startup
@@ -335,6 +345,22 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 			return
 		}
 
+		// Log file upload to Google Sheets if service is available
+		if b.SheetsService != nil {
+			username := message.From.UserName
+			if username == "" {
+				username = fmt.Sprintf("%s %s", message.From.FirstName, message.From.LastName)
+			}
+
+			err := b.SheetsService.LogFileUpload(dbFile, username)
+			if err != nil {
+				log.Printf("Error logging to Google Sheets: %v", err)
+				// Продолжаем выполнение, даже если запись в Google Sheets не удалась
+			} else {
+				log.Printf("File upload logged to Google Sheets: ID=%d, User=%s", dbFile.ID, username)
+			}
+		}
+
 		// Send confirmation with file ID
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Файл успешно сохранен.\nID файла: %d\nИмя файла: %s\nТип файла: %s",
 			dbFile.ID, dbFile.FileName, dbFile.FileType))
@@ -395,6 +421,22 @@ func (b *Bot) handleFileUpload(message *tgbotapi.Message, fileID, fileName, file
 		msg := tgbotapi.NewMessage(message.Chat.ID, "Ошибка при сохранении файла.")
 		b.API.Send(msg)
 		return
+	}
+
+	// Log file upload to Google Sheets if service is available
+	if b.SheetsService != nil {
+		username := message.From.UserName
+		if username == "" {
+			username = fmt.Sprintf("%s %s", message.From.FirstName, message.From.LastName)
+		}
+
+		err := b.SheetsService.LogFileUpload(dbFile, username)
+		if err != nil {
+			log.Printf("Error logging to Google Sheets: %v", err)
+			// Продолжаем выполнение, даже если запись в Google Sheets не удалась
+		} else {
+			log.Printf("File upload logged to Google Sheets: ID=%d, User=%s", dbFile.ID, username)
+		}
 	}
 
 	// Send confirmation with file ID
