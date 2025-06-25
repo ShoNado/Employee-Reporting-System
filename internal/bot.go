@@ -235,37 +235,43 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 
 	// Handle delete confirmation
 	if strings.HasPrefix(callback.Data, "confirm_delete_") {
-		fileID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "confirm_delete_"), 10, 64)
+		if callback.Data == "confirm_delete_all" {
+			// Handle delete all files
+			// Delete all files for the user
+			err := b.DB.DeleteUserFiles(callback.From.ID)
+			if err != nil {
+				log.Printf("Error deleting files: %v", err)
+				msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файлов.")
+				b.API.Send(msg)
+				return
+			}
 
-		// Delete file
-		err := b.DB.DeleteFile(fileID)
-		if err != nil {
-			log.Printf("Error deleting file: %v", err)
-			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файла.")
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Все доступные вам файлы успешно удалены.")
 			b.API.Send(msg)
-			return
-		}
+		} else {
+			// Handle delete single file
+			fileID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "confirm_delete_"), 10, 64)
 
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Файл успешно удален.")
-		b.API.Send(msg)
+			// Delete file
+			err := b.DB.DeleteFile(fileID)
+			if err != nil {
+				log.Printf("Error deleting file: %v", err)
+				msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файла.")
+				b.API.Send(msg)
+				return
+			}
+
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Файл успешно удален.")
+			b.API.Send(msg)
+		}
 	} else if strings.HasPrefix(callback.Data, "cancel_delete_") {
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файла отменено.")
-		b.API.Send(msg)
-	} else if callback.Data == "confirm_delete_all" {
-		// Delete all files for the user
-		err := b.DB.DeleteUserFiles(callback.From.ID)
-		if err != nil {
-			log.Printf("Error deleting files: %v", err)
-			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Ошибка при удалении файлов.")
+		if callback.Data == "cancel_delete_all" {
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файлов отменено.")
 			b.API.Send(msg)
-			return
+		} else {
+			msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файла отменено.")
+			b.API.Send(msg)
 		}
-
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Все доступные вам файлы успешно удалены.")
-		b.API.Send(msg)
-	} else if callback.Data == "cancel_delete_all" {
-		msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "Удаление файлов отменено.")
-		b.API.Send(msg)
 	}
 
 	// Respond to callback
@@ -458,7 +464,7 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 /list - показать список ваших файлов
 /show <id> - показать файл по его ID
 /delete <id> - удалить файл по его ID
-/deleteall - удалить все доступные вам файлы
+/deleteall - удалить все ваши файлы
 
 Ограничения:
 - Максимальный размер файла: 100 МБ
@@ -652,7 +658,7 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 			),
 		)
 
-		msg := tgbotapi.NewMessage(message.Chat.ID, "Вы уверены, что хотите удалить все доступные вам файлы? Это действие нельзя отменить.")
+		msg := tgbotapi.NewMessage(message.Chat.ID, "Вы уверены, что хотите удалить все ваши файлы? Это действие нельзя отменить.")
 		msg.ReplyMarkup = keyboard
 		b.API.Send(msg)
 

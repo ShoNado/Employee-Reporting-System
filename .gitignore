@@ -1,4 +1,5 @@
 /config/config.json
-
+/config/credentials.json
 db/telegram.db
 *.db
+*.json
